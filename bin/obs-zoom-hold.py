@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """Hold-to-zoom daemon for obs-zoom-to-mouse-wayland.
 
-Grabs the keyboard globally via evdev so the key combination is dedicated to
-zoom. Requires access to /dev/input — run as root or add your user to the
-input group (``sudo usermod -aG input $USER`` then log out/in).
+Listens for Alt + Ctrl + X on the keyboard via evdev so the key combination
+triggers hold-to-zoom. Does NOT grab the keyboard exclusively — all other apps
+keep receiving keyboard events normally.
 
 Hold  Alt + Ctrl + X  to zoom in.
 Release Alt + Ctrl + X  to zoom out.
 
 Usage:
-    sudo python3 obs-zoom-hold.py
-    # or, as your user (after joining the input group):
     python3 obs-zoom-hold.py
+    # or with systemd user service (installed by install.sh)
 """
 import sys
 import os
@@ -90,7 +89,8 @@ class HoldToZoom:
 
     # ---------------------------------------------------------------- main loop
     def run(self):
-        self.device.grab()           # exclusive grab — no other app sees these keys
+        # No exclusive grab — other apps keep receiving keyboard events normally.
+        # We only filter for Alt+Ctrl+X; everything else passes through.
         try:
             for event in self.device.read_loop():
                 if event.type != ecodes.EV_KEY:
@@ -116,7 +116,6 @@ class HoldToZoom:
                 elif event.value == 0:  # X released
                     self.zoom_out()
         finally:
-            self.device.ungrab()
             self.device.close()
 
 
