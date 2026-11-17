@@ -21,6 +21,12 @@ How to use:
   4. For global keys, run:  python3 bin/obs-key-log.py
      (needs python3-evdev + /dev/input access; see the file's header).
   5. Press keys — they appear in the text source, hence on stream/record.
+
+Extras:
+  * Exceptions — comma-separated keys that won't show up, e.g. "Shift, X, F1".
+                 Any part of a pressed combo matching an exception is suppressed.
+  * Toggle     — bind "Toggle Key Display" in Settings → Hotkeys → Scripts to
+                 turn the whole display on/off mid-stream.
 ]]
 
 local obs = obslua
@@ -36,11 +42,12 @@ local state = {
     prefix        = "",
     suffix        = "",
     uppercase     = false,
-    max_display   = 1,               -- how many recent keys to show
+    exceptions    = "",              -- comma-separated keys to suppress
+    enabled       = true,            -- master on/off
 }
 
 local hotkey_ids = {}
-local key_history = {}   -- { {key=..., time=...}, ... }
+local toggle_hotkey_id = nil
 local last_text = ""
 local last_update_time = 0
 
@@ -52,26 +59,36 @@ local function trim(s)
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-local NICE = {
-    LEFTALT = "Alt", RIGHTALT = "Alt",
-    LEFTCTRL = "Ctrl", RIGHTCTRL = "Ctrl",
-    LEFTSHIFT = "Shift", RIGHTSHIFT = "Shift",
-    LEFTMETA = "Super", RIGHTMETA = "Super",
-    RET = "Enter", KPENTER = "Enter",
-    ESC = "Esc", SPACE = "Space", TAB = "Tab",
-    BACKSPACE = "Backspace", DELETE = "Delete",
-    CAPSLOCK = "CapsLock", NUMLOCK = "NumLock", SCROLLLOCK = "ScrollLock",
-}
+local function split_csv(s)
+    local out = {}
+    if trim(s) == "" then
+        return out
+    end
+    for part in s:gmatch("([^,]+)") do
+        local p = trim(part):lower()
+        if p ~= "" then
+            table.insert(out, p)
+        end
+    end
+    return out
+end
 
-local function format_key(key)
-    if state.uppercase then
-        key = key:upper()
+local exceptions_list = {}
+
+local function is_exception(key_text)
+    if #exceptions_list == 0 then
+        return false
     end
-    local disp = key:gsub("^KEY_", "")
-    if NICE[disp] then
-        return NICE[disp]
+    -- Check each segment of a combo like "Ctrl + Alt + X"
+    for seg in key_text:gmatch("([^%+]+)") do
+        local s = trim(seg):lower()
+        for _, exc in ipairs(exceptions_list) do
+            if s == exc then
+                return true
+            end
+        end
     end
-    return disp
+    return false
 end
 
 -- Write text to the chosen OBS text source.
@@ -90,36 +107,31 @@ local function set_source_text(text)
     obs.obs_source_release(source)
 end
 
-local function press_key(key)
-    -- Don't clutter the history with repeated identical keys (key repeat).
-    if #key_history > 0 and key_history[#key_history].key == key then
-        key_history[#key_history].time = os.time()
+local function apply_text(text)
+    if not state.enabled then
         return
     end
-    table.insert(key_history, {key = key, time = os.time()})
-    while #key_history > 50 do
-        table.remove(key_history, 1)
+    if is_exception(text) then
+        return
     end
-
-    local start = math.max(1, #key_history - state.max_display + 1)
-    local parts = {}
-    for i = start, #key_history do
-        table.insert(parts, format_key(key_history[i].key))
+    if state.uppercase then
+        text = text:upper()
     end
-    local text = table.concat(parts, " + ")
     if state.prefix ~= "" then
         text = state.prefix .. text
     end
     if state.suffix ~= "" then
         text = text .. state.suffix
     end
-
     set_source_text(text)
     last_text = text
     last_update_time = os.time()
 end
 
 local function clear_if_needed()
+    if not state.enabled then
+        return
+    end
     if state.clear_after <= 0 then
         return
     end
@@ -129,7 +141,6 @@ local function clear_if_needed()
     if os.time() - last_update_time >= state.clear_after then
         set_source_text("")
         last_text = ""
-        key_history = {}
     end
 end
 
@@ -163,12 +174,15 @@ local function read_last_key_file()
 end
 
 local function check_file()
+    if not state.enabled then
+        return
+    end
     if state.mode ~= "global" and state.mode ~= "both" then
         return
     end
-    local key = read_last_key_file()
-    if key then
-        press_key(key)
+    local content = read_last_key_file()
+    if content and content ~= last_text then
+        apply_text(content)
     end
     clear_if_needed()
 end
@@ -182,11 +196,27 @@ local function make_hotkey_callback(slot)
         if not pressed then
             return
         end
+        if not state.enabled then
+            return
+        end
         if state.mode ~= "hotkeys" and state.mode ~= "both" then
             return
         end
-        press_key(slot)
+        apply_text(slot)
         clear_if_needed()
+    end
+end
+
+local function make_toggle_callback()
+    return function(pressed)
+        if not pressed then
+            return
+        end
+        state.enabled = not state.enabled
+        if not state.enabled then
+            set_source_text("")
+            last_text = ""
+        end
     end
 end
 
@@ -212,6 +242,21 @@ local function reload_hotkeys(settings)
             table.insert(hotkey_ids, id)
         end
     end
+
+    -- Master toggle hotkey
+    if toggle_hotkey_id then
+        obs.obs_hotkey_unregister(toggle_hotkey_id)
+    end
+    toggle_hotkey_id = obs.obs_hotkey_register_frontend(
+        "key_display.toggle", "Toggle Key Display", make_toggle_callback())
+    if toggle_hotkey_id ~= obs.OBS_INVALID_HOTKEY_ID then
+        local array = obs.obs_data_get_array(settings, "hotkey_toggle")
+        if array then
+            obs.obs_hotkey_load(toggle_hotkey_id, array)
+            obs.obs_data_array_release(array)
+        end
+        table.insert(hotkey_ids, toggle_hotkey_id)
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -227,6 +272,10 @@ logger (bin/obs-key-log.py) running — it needs python3-evdev and access to
 
 Hotkey mode: binds OBS hotkeys (Settings → Hotkeys → Scripts → "Key Display
 slot N"). Press a bound key and it appears in the text source.
+
+Extras:
+  * Exceptions — comma-separated keys that won't show up (e.g. "Shift, X, F1").
+  * Toggle     — bind "Toggle Key Display" to turn the display on/off.
 
 Add a "Text (FreeType2)" source to your scene, style it (font, color,
 background, opacity), select it below, and the keys show on stream/record.]]
@@ -266,6 +315,10 @@ function script_properties()
     obs.obs_properties_add_text(
         props, "key_file", "Key log file path", obs.OBS_TEXT_DEFAULT)
 
+    obs.obs_properties_add_text(
+        props, "exceptions",
+        "Exceptions (comma-separated, e.g. Shift, X, F1)", obs.OBS_TEXT_DEFAULT)
+
     obs.obs_properties_add_int(
         props, "clear_after", "Clear text after (seconds, 0 = never)", 0, 3600, 1)
     obs.obs_properties_add_text(props, "prefix", "Prefix text", obs.OBS_TEXT_DEFAULT)
@@ -279,6 +332,7 @@ function script_defaults(settings)
     obs.obs_data_set_default_string(settings, "mode", "global")
     obs.obs_data_set_default_string(settings, "source", "")
     obs.obs_data_set_default_string(settings, "key_file", "")
+    obs.obs_data_set_default_string(settings, "exceptions", "")
     obs.obs_data_set_default_int(settings, "clear_after", 3)
     obs.obs_data_set_default_string(settings, "prefix", "")
     obs.obs_data_set_default_string(settings, "suffix", "")
@@ -293,6 +347,8 @@ function script_update(settings)
     state.prefix        = obs.obs_data_get_string(settings, "prefix")
     state.suffix        = obs.obs_data_get_string(settings, "suffix")
     state.uppercase     = obs.obs_data_get_bool(settings, "uppercase")
+    state.exceptions    = obs.obs_data_get_string(settings, "exceptions")
+    exceptions_list     = split_csv(state.exceptions)
 
     if state.key_file == "" then
         state.key_file = default_key_file()
@@ -303,7 +359,6 @@ function script_update(settings)
     -- Reset the displayed text when the config changes.
     set_source_text("")
     last_text = ""
-    key_history = {}
     last_update_time = 0
 end
 
@@ -316,11 +371,19 @@ function script_save(settings)
             obs.obs_data_array_release(array)
         end
     end
+    if toggle_hotkey_id and toggle_hotkey_id ~= obs.OBS_INVALID_HOTKEY_ID then
+        local array = obs.obs_hotkey_save(toggle_hotkey_id)
+        obs.obs_data_set_array(settings, "hotkey_toggle", array)
+        obs.obs_data_array_release(array)
+    end
 end
 
 function script_load(settings)
     if trim(obs.obs_data_get_string(settings, "key_file")) == "" then
         obs.obs_data_set_string(settings, "key_file", default_key_file())
+    end
+    if obs.obs_data_get_string(settings, "exceptions") == nil then
+        obs.obs_data_set_string(settings, "exceptions", "")
     end
     script_update(settings)
 
@@ -334,5 +397,6 @@ function script_unload()
         obs.obs_hotkey_unregister(id)
     end
     hotkey_ids = {}
+    toggle_hotkey_id = nil
     set_source_text("")
 end

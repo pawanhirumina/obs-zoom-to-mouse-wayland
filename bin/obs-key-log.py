@@ -39,6 +39,7 @@ except ImportError:
     )
     sys.exit(1)
 
+# Integer evdev codes for modifier keys.
 MODIFIER_CODES = {
     ecodes.KEY_LEFTCTRL,
     ecodes.KEY_RIGHTCTRL,
@@ -62,15 +63,16 @@ MOD_ORDER = [
     ecodes.KEY_RIGHTMETA,
 ]
 
+# Friendly label per modifier code (Left/Right variants collapse to one family).
 MOD_LABELS = {
-    "Leftctrl": "Ctrl",
-    "Rightctrl": "Ctrl",
-    "Leftalt": "Alt",
-    "Rightalt": "Alt",
-    "Leftshift": "Shift",
-    "Rightshift": "Shift",
-    "Leftmeta": "Super",
-    "Rightmeta": "Super",
+    ecodes.KEY_LEFTCTRL: "Ctrl",
+    ecodes.KEY_RIGHTCTRL: "Ctrl",
+    ecodes.KEY_LEFTALT: "Alt",
+    ecodes.KEY_RIGHTALT: "Alt",
+    ecodes.KEY_LEFTSHIFT: "Shift",
+    ecodes.KEY_RIGHTSHIFT: "Shift",
+    ecodes.KEY_LEFTMETA: "Super",
+    ecodes.KEY_RIGHTMETA: "Super",
 }
 
 XDG_STATE = os.environ.get("XDG_STATE_HOME") or os.path.join(
@@ -100,36 +102,24 @@ def write_key(text):
 
 
 def modifier_labels(mods):
+    """Return a de-duplicated list of modifier family labels (Ctrl, Alt, …)."""
     labels = []
     seen = set()
-    # ecodes may not expose a reverse KEY map in every python-evdev version,
-    # so build labels from the codes we already know.
-    known = {
-        ecodes.KEY_LEFTCTRL: "Leftctrl",
-        ecodes.KEY_RIGHTCTRL: "Rightctrl",
-        ecodes.KEY_LEFTALT: "Leftalt",
-        ecodes.KEY_RIGHTALT: "Rightalt",
-        ecodes.KEY_LEFTSHIFT: "Leftshift",
-        ecodes.KEY_RIGHTSHIFT: "Rightshift",
-        ecodes.KEY_LEFTMETA: "Leftmeta",
-        ecodes.KEY_RIGHTMETA: "Rightmeta",
-    }
     for code in MOD_ORDER:
         if code in mods:
-            base = known[code]
-            family = base.lstrip("LR").lower()
+            family = MOD_LABELS[code]
             if family in seen:
                 continue
             seen.add(family)
-            labels.append(MOD_LABELS[base])
+            labels.append(family)
     return labels
 
 
-def key_label(key_name):
-    # key_name is like 'KEY_A' -> 'A'. keycode can occasionally be a list.
-    if isinstance(key_name, (list, tuple)):
-        key_name = key_name[0] if key_name else ""
-    return key_name[len("KEY_"):] if key_name.startswith("KEY_") else key_name
+def key_label(keycode):
+    """'KEY_A' -> 'A'. keycode can occasionally be a list."""
+    if isinstance(keycode, (list, tuple)):
+        keycode = keycode[0] if keycode else ""
+    return keycode[len("KEY_"):] if keycode.startswith("KEY_") else keycode
 
 
 def find_keyboard():
@@ -145,31 +135,39 @@ def find_keyboard():
 def main():
     ensure_dir()
     device = find_keyboard()
-    mods = set()
+    mods = set()  # stores integer evdev codes currently held
     try:
         for event in device.read_loop():
             if event.type != ecodes.EV_KEY:
                 continue
             ke = categorize(event)
             code = event.code
-            key = ke.keycode  # e.g. 'KEY_A'
+            keycode = ke.keycode  # e.g. 'KEY_A'
 
             if code in MODIFIER_CODES:
                 if ke.keystate == KeyEvent.key_down:
-                    mods.add(key)
-                    write_key(" + ".join(modifier_labels(mods) + [key_label(key)]))
+                    mods.add(code)
+                    # Modifier pressed alone: show just the modifier name.
+                    # Modifier + another key handled below when that key comes down.
+                    labels = modifier_labels(mods)
+                    if labels:
+                        write_key(labels[0])
                 elif ke.keystate == KeyEvent.key_up:
-                    mods.discard(key)
+                    mods.discard(code)
+                    if not mods:
+                        # All modifiers released — clear so Lua can blank the text.
+                        write_key("")
                 continue
 
-            # Only key presses (down), not releases or repeats we already dedupe.
+            # Only key presses (down), not releases.
             if ke.keystate != KeyEvent.key_down:
                 continue
 
-            if mods:
-                display = " + ".join(modifier_labels(mods) + [key_label(key)])
+            labels = modifier_labels(mods)
+            if labels:
+                display = " + ".join(labels + [key_label(keycode)])
             else:
-                display = key_label(key)
+                display = key_label(keycode)
 
             write_key(display)
     finally:
