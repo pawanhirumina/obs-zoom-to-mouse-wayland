@@ -142,6 +142,27 @@ sudo python3 ~/.local/bin/obs-zoom-hold.py
 Hold-to-zoom and the toggle hotkeys (`Ctrl+Alt+Z` / `Ctrl+Alt+A`) work side by side —
 use whichever you prefer.
 
+### Key display / keyboard visualizer
+
+`scripts/obs-key-display.lua` shows the keys you press inside an OBS text source,
+so you can use it as an on-screen keycaster on your stream or recording.
+
+1. In OBS: **Tools → Scripts → ＋** and add `scripts/obs-key-display.lua`.
+2. Add a **Text (FreeType2)** source to your scene and style it (font, color,
+   background, opacity) — that styling is what appears on stream.
+3. In the script settings, select that text source as **Text Source**.
+4. For global keys (any key pressed anywhere on the desktop), run:
+   ```bash
+   python3 bin/obs-key-log.py
+   ```
+   This needs `python3-evdev` and access to `/dev/input` (add your user to the
+   `input` group and log out/in, or run with `sudo`), the same as hold-to-zoom.
+5. Press keys — they show up in the text source.
+
+The script also has an **OBS hotkeys only** mode: bind keys in
+**Settings → Hotkeys → Scripts → "Key Display slot N"** and they appear when
+pressed, with no extra dependencies.
+
 ## How it works
 
 Three small, focused pieces cooperate over D-Bus and OBS's WebSocket:
